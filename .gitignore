@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# C++/CMake
+/build/
+/cpp/build/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.obj
+*.pdb
+*.exe
+*.dll
+*.lib
+*.out
+*.a
+
+# OS
+.DS_Store
+Thumbs.db
