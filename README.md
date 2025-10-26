@@ -1,195 +1,84 @@
-# Manual de Usuario — Arreglo de Sufijos (MM / SA-IS) y FM-Index
+# FMI App (C++): Compresión con SA → BWT → MTF → RLE₀ → Huffman
 
-Este manual explica cómo **compilar** y **ejecutar** las implementaciones en **Python** y **C++**, cómo **medir** tiempos/memoria y cómo **buscar** patrones con el **FM-Index**.
-
----
-
-## 1) Requisitos
-
-- **Windows 10/11** con **Visual Studio Code**
-- **Python 3.10+** (sin librerías adicionales)
-- **CMake** y un compilador **C++**
-  - Opción A: **Visual Studio 2022** (Desktop development with C++)
-  - Opción B: **MinGW-w64** (g++)
-- 4 archivos `.txt` en `data/` (por ejemplo, de Project Gutenberg / Internet Archive)
-
-> Asegura agregar `cmake` (y `g++` si usas MinGW) al **PATH** del sistema.
+Herramienta de línea de comando para **comprimir** y **descomprimir** texto usando:
+**Suffix Array (Manber–Myers) → Burrows–Wheeler (BWT) → Move-To-Front (MTF) → Run-Length de ceros (RLE₀) → Huffman**, y su inversa.  
+El contenedor **`.fmi`** almacena metadatos mínimos para recuperar el archivo original **exacto**.
 
 ---
 
-## 2) Estructura del proyecto (sugerida)
-
-```
-Act_Integradora/
-├─ cpp/
-│  ├─ CMakeLists.txt
-│  ├─ include/                # suffix_array_mm.hpp, sais.hpp, fm_index.hpp
-│  └─ src/                    # main.cpp, *.cpp
-├─ python/
-│  ├─ manber_myers_fixed.py
-│  ├─ sais_fixed.py
-│  ├─ fm_index.py
-│  └─ bench.py
-└─ data/                      # libros .txt 
-```
+## Introducción
+- Compresor/descompresor reproducible y rápido, orientado a textos.
+- Decisiones clave:
+  - Sentinela **0x00** para construir SA/BWT (seguro y único).
+  - Inversa de BWT con **LF-mapping** (tablas `C[c]` y `rank` por símbolo).
+  - Huffman **MSB-first** con empaquetado correcto: primero bytes completos, al final byte parcial con padding.
+- Exactitud verificada por hash del archivo original vs. descomprimido.
 
 ---
 
-## 3) Preparar los datos
-
-Coloca los 4 libros `.txt` en `data/`:
-
-```
-data/libro1.txt  data/libro2.txt  data/libro3.txt  data/libro4.txt
-```
-
-> El software **añade** el sentinela `$` al final si no está presente.
+## Dependencias
+- **CMake ≥ 3.16**
+- **Compilador C++17**
+  - Windows: **MSYS2/MinGW-w64** (recomendado) o **MSVC (Visual Studio)**
+- (Opcional) PowerShell para los ejemplos de ejecución.
 
 ---
 
-## 4) Ejecución en **Python**
+## Instalación y compilación
 
-Ejecuta estos comandos **desde** la carpeta `python/`.
+### Opción A — MSYS2/MinGW (recomendada)
+    cd cpp
+    $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+    cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-mingw -j
+    # Ejecutable:
+    $exe = ".\build-mingw\fmi_app.exe"
 
-### 4.1 Bench **rápido** (MM + FM-Index)
-
-```powershell
-cd python
-python bench.py --books ../data/libro1.txt ../data/libro2.txt ../data/libro3.txt ../data/libro4.txt --queries "the" "and" " de " " la " --status --skip-sais
-```
-
-**Qué hace:**
-- Construye el **SA** con **Manber & Myers (MM)** por libro y mide **tiempo** + **pico de memoria (KB)**.
-- Construye el **FM-Index** y ejecuta consultas de ejemplo (`--queries`).
-
-### 4.2 SA-IS (Python) con truncado (recomendado)
-
-SA-IS en Python puro es costoso para textos grandes. Ejecuta **por libro** con límite de **200k** caracteres:
-
-```powershell
-python bench.py --books ../data/libro1.txt --status --skip-mm --skip-fm --max_chars 200000
-python bench.py --books ../data/libro2.txt --status --skip-mm --skip-fm --max_chars 200000
-python bench.py --books ../data/libro3.txt --status --skip-mm --skip-fm --max_chars 200000
-python bench.py --books ../data/libro4.txt --status --skip-mm --skip-fm --max_chars 200000
-```
-
-**Opciones útiles de `bench.py`:**
-
-- `--books <paths...>`: rutas a `.txt`  
-- `--queries <q1 q2 ...>`: patrones para FM-Index  
-- `--status`: progreso por fases  
-- `--skip-sais | --skip-mm | --skip-fm`: omite fases  
-- `--max_chars N`: trunca cada libro a **N** caracteres
+### Opción B — Visual Studio (MSVC)
+    cd cpp
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j
+    # Ejecutable típico:
+    $exe = ".\build\Release\fmi_app.exe"
 
 ---
 
-## 5) Compilación y ejecución en **C++**
+## Uso
+    fmi_app compress <input.txt> -o <output.fmi>
+    fmi_app decompress <input.fmi> -o <output.txt>
 
-Ejecuta estos pasos **desde** la carpeta `cpp/`.
+**Ejemplos**
 
-### 5.1 Compilar con CMake
+*Prueba rápida (“toy”):*
+    
+    Set-Content -NoNewline ..\data\toy.txt "mississippi"
+    $exe compress ..\data\toy.txt -o ..\data\toy.fmi
+    $exe decompress ..\data\toy.fmi -o ..\data\toy_out.txt
+    (Get-FileHash ..\data\toy.txt).Hash -eq (Get-FileHash ..\data\toy_out.txt).Hash  # True
 
-**Si ya tienes configurado `build/`:**
-```powershell
-cmake --build build --config Release
-```
-
-**Primera vez (Visual Studio 2022 x64):**
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-```
-
-*(Si usas MinGW-w64, puedes usar `-G "MinGW Makefiles"` y `mingw32-make`.)*
-
-### 5.2 Seleccionar el ejecutable (PowerShell 5.1)
-
-```powershell
-if (Test-Path .\build\Release\sa_app.exe) {
-  $exe = ".\build\Release\sa_app.exe"
-} elseif (Test-Path .\build\sa_app.exe) {
-  $exe = ".\build\sa_app.exe"
-} else {
-  throw "No se encontró sa_app.exe. Compila primero."
-}
-```
-
-> En **PowerShell 7** (`pwsh`) puedes usar el operador ternario `? :`; en PS 5.1 no.
-
-### 5.3 Ejecutar
-
-**Manber & Myers**
-```powershell
-& $exe --algo mm --file ..\data\libro1.txt
-```
-
-**SA-IS**
-```powershell
-& $exe --algo sais --file ..\data\libro1.txt
-```
-
-**FM-Index (conteo + posiciones)**
-```powershell
-& $exe --algo fm --file ..\data\libro1.txt --query "the" --print-positions > ..\data\occ_the_libro1.txt
-```
-
-**Opciones de `sa_app`:**
-
-- `--algo {mm|sais|fm}`: Manber-Myers, SA-IS o FM-Index  
-- `--file <ruta>`: texto de entrada (`.txt`)  
-- `--query <patrón>`: patrón a buscar (solo con `--algo fm`)  
-- `--print-positions`: imprime **todas** las posiciones (recomendado redirigir a archivo)
+*Archivo mayor:*
+    
+    $exe compress ..\data\libro1.txt -o ..\data\libro1.fmi
+    $exe decompress ..\data\libro1.fmi -o ..\data\libro1_out.txt
+    (Get-FileHash ..\data\libro1.txt).Hash -eq (Get-FileHash ..\data\libro1_out.txt).Hash  # True
 
 ---
 
-## 6) Verificación rápida (toy test)
-
-```powershell
-# Crear archivo pequeño
-Set-Content ..\data\toy.txt "mississippi"
-
-# Probar MM / SA-IS / FM
-& $exe --algo mm   --file ..\data\toy.txt
-& $exe --algo sais --file ..\data\toy.txt
-& $exe --algo fm   --file ..\data\toy.txt --query "issi" --print-positions
-```
-
-**Esperado:** SA correcto; FM-Index encuentra `"issi"` en dos posiciones.
+## Detalles relevantes
+- **`.fmi`** contiene:
+  - `orig_len_no_sentinel` (u32), `had_sentinel` (u8),
+  - `alphabet` (u8[] para MTF),
+  - **codebook de Huffman** ((sym, len, code)),
+  - `rle_len` (u32) y `bitstream` (bytes MSB-first).
+- **Descompresión robusta:** tras BWT⁻¹, si el original no tenía sentinela, se recorta por `orig_len_no_sentinel`; si lo tenía, se valida longitud exacta.
 
 ---
 
-## 7) Problemas comunes (y solución)
-
-- **`cmake` no se reconoce**  
-  Instala CMake y agrega `<CMake>\bin` al **PATH**.
-
-- **PowerShell 5.1 no acepta `? :`**  
-  Usa el bloque `if / elseif` para asignar `$exe` (mostrado arriba).
-
-- **SA-IS (Python) tarda mucho**  
-  Usa `--max_chars` (100k–200k) y ejecuta libro por libro con `--status`.
-
-- **Salidas muy grandes de posiciones**  
-  Redirige a archivo con `>` (ej.: `..\data\occ_the_libro1.txt`).
-
-- **Rutas relativas**  
-  Corre los comandos **desde** `python/` o `cpp/` según corresponda.
+## Créditos
+- **Jesús Eduardo García Luna – A01739060**  
+- **Victoria Iluminda Rosales García – A01734739**
 
 ---
 
-## 8) Ejemplos útiles
-
-**FM-Index con varias consultas:**
-```powershell
-& $exe --algo fm --file ..\data\libro2.txt --query "and"
-& $exe --algo fm --file ..\data\libro2.txt --query " the " --print-positions > ..\data\occ_the_libro2.txt
-```
-
-**Bench Python saltando fases costosas:**
-```powershell
-python bench.py --books ../data/libro1.txt ../data/libro2.txt --queries "the" "and" --status --skip-sais
-```
-
----
-
-### Fin del manual
+## Licencia
+Uso académico. Se distribuye “tal cual”, sin garantías. Propósito didáctico para acompañar contenidos de estructuras de datos y algoritmos.
