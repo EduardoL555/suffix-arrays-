@@ -1,20 +1,30 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# C++/CMake
-/build/
-/cpp/build/
-CMakeFiles/
-CMakeCache.txt
-*.o
-*.obj
-*.pdb
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+
+# Go
 *.exe
-*.dll
-*.lib
+*.test
 *.out
-*.a
+go.sum
+
+# Data logs
+*.log
+
+# Data (Ignorar todo excepto un ejemplo si quisieras)
+data/*
+!data/sample.txt
+!data/.keep
 
 # OS
 .DS_Store

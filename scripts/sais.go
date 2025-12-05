@@ -1,9 +1,4 @@
-// sais.go
-// Implementación simplificada de SA-IS en Go
-// - Usa BitVector para los tipos S/L (optimización de espacio).
-// - Construye SA, BWT y FM-Index.
-// - Reporta tiempo y memoria.
-
+// scripts/sais.go
 package main
 
 import (
@@ -12,226 +7,326 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
 
-type BitVector []byte
+// ========================================================================
+// SA-IS (Suffix Array - Induced Sorting) - CANONICAL GO PORT
+// Soporta recursión completa y alfabeto de enteros.
+// ========================================================================
 
-func NewBitVector(n int) BitVector {
-	return make(BitVector, (n+7)/8)
-}
+// Tipos de sufijos
+const (
+	L_TYPE = false // Large
+	S_TYPE = true  // Small
+)
 
-func (b BitVector) set(i int, v bool) {
-	byteIdx := i / 8
-	bit := uint(i % 8)
-	if v {
-		b[byteIdx] |= (1 << bit)
-	} else {
-		b[byteIdx] &^= (1 << bit)
-	}
-}
-
-func (b BitVector) get(i int) bool {
-	byteIdx := i / 8
-	bit := uint(i % 8)
-	return (b[byteIdx]>>bit)&1 == 1
-}
-
-func getBuckets(T []rune) (map[rune][2]int, map[rune]int) {
-	counts := make(map[rune]int)
+// getBuckets calcula los inicios y finales de los buckets
+func getBuckets(T []int, k int) ([]int, []int) {
+	counts := make([]int, k)
 	for _, c := range T {
 		counts[c]++
 	}
-	buckets := make(map[rune][2]int)
-	start := 0
-	for _, c := range sortedKeys(counts) {
-		buckets[c] = [2]int{start, start + counts[c]}
-		start += counts[c]
+
+	bktStarts := make([]int, k)
+	bktEnds := make([]int, k)
+	sum := 0
+	for i := 0; i < k; i++ {
+		bktStarts[i] = sum
+		sum += counts[i]
+		bktEnds[i] = sum
 	}
-	return buckets, counts
+	return bktStarts, bktEnds
 }
 
-func sortedKeys(m map[rune]int) []rune {
-	keys := make([]rune, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// simple insertion sort (n pequeño comparado con |T|)
-	for i := 1; i < len(keys); i++ {
-		j := i
-		for j > 0 && keys[j-1] > keys[j] {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-			j--
+// induceSAL induce los tipos L (L-type)
+func induceSAL(T []int, SA []int, types []bool, bktStarts []int) {
+	n := len(T)
+	// Copiamos bktStarts porque lo vamos a modificar
+	bkt := make([]int, len(bktStarts))
+	copy(bkt, bktStarts)
+
+	for i := 0; i < n; i++ {
+		j := SA[i] - 1
+		if j >= 0 && types[j] == L_TYPE {
+			c := T[j]
+			SA[bkt[c]] = j
+			bkt[c]++
 		}
 	}
-	return keys
 }
 
-func classifyTypes(T []rune) BitVector {
+// induceSAS induce los tipos S (S-type)
+func induceSAS(T []int, SA []int, types []bool, bktEnds []int) {
 	n := len(T)
-	types := NewBitVector(n)
-	// true = S, false = L
-	types.set(n-1, true)
+	// Copiamos bktEnds
+	bkt := make([]int, len(bktEnds))
+	copy(bkt, bktEnds)
+
+	for i := n - 1; i >= 0; i-- {
+		j := SA[i] - 1
+		if j >= 0 && types[j] == S_TYPE {
+			c := T[j]
+			bkt[c]-- // Decrementar antes de escribir (exclusivo -> inclusivo)
+			SA[bkt[c]] = j
+		}
+	}
+}
+
+// saisCore es el núcleo recursivo
+func saisCore(T []int, k int) []int {
+	n := len(T)
+	SA := make([]int, n)
+	if n == 0 {
+		return SA
+	}
+	if n == 1 {
+		SA[0] = 0
+		return SA
+	}
+
+	// 1. Clasificar sufijos (S/L)
+	types := make([]bool, n)
+	types[n-1] = S_TYPE
 	for i := n - 2; i >= 0; i-- {
 		if T[i] < T[i+1] {
-			types.set(i, true)
-		} else if T[i] == T[i+1] && types.get(i+1) {
-			types.set(i, true)
+			types[i] = S_TYPE
+		} else if T[i] > T[i+1] {
+			types[i] = L_TYPE
 		} else {
-			types.set(i, false)
+			types[i] = types[i+1]
 		}
 	}
-	return types
-}
 
-func placeLMS(sa []int, lmsMap map[int]int, buckets map[rune][2]int, T []rune, types BitVector) {
-	count := make(map[rune]int)
-	lastLMS := -1
-	n := len(T)
-	for i := n - 1; i > 0; i-- {
-		if types.get(i) && !types.get(i-1) {
+	// Identificar LMS (Left-Most S-type)
+	isLMS := func(i int) bool {
+		return i > 0 && types[i] == S_TYPE && types[i-1] == L_TYPE
+	}
+
+	// 2. Paso 1: LMS Tentativo
+	// Inicializar SA con -1
+	for i := 0; i < n; i++ {
+		SA[i] = -1
+	}
+
+	_, bktEnds := getBuckets(T, k)
+	bkt := make([]int, k)
+	copy(bkt, bktEnds)
+
+	// Insertar LMS al final de sus buckets S
+	for i := 1; i < n; i++ {
+		if isLMS(i) {
 			c := T[i]
-			count[c]++
-			b := buckets[c]
-			pos := b[1] - count[c]
-			sa[pos] = i
-			if lastLMS != -1 {
-				lmsMap[i] = lastLMS
-			}
-			lastLMS = i
+			bkt[c]--
+			SA[bkt[c]] = i
 		}
 	}
-	lmsMap[n-1] = n - 1
-}
 
-func induceL(sa []int, buckets map[rune][2]int, T []rune, types BitVector) {
-	count := make(map[rune]int)
-	for i := 0; i < len(sa); i++ {
-		j := sa[i]
-		if j > 0 && !types.get(j-1) {
-			c := T[j-1]
-			b := buckets[c]
-			pos := b[0] + count[c]
-			if sa[pos] == -1 {
-				sa[pos] = j - 1
-			}
-			count[c]++
+	// 3. Paso 2: Inducir SA
+	bktStarts, _ := getBuckets(T, k)
+	induceSAL(T, SA, types, bktStarts)
+	induceSAS(T, SA, types, bktEnds)
+
+	// 4. Paso 3: Renombrar LMS
+	// Compactar los índices LMS ordenados
+	nLMS := 0
+	for _, x := range SA {
+		if isLMS(x) {
+			SA[nLMS] = x
+			nLMS++
 		}
 	}
-}
+	// Limpiar el resto de SA para reutilizar memoria si se desea,
+	// pero aquí usaremos índices claros.
+	lmsIdx := SA[:nLMS] // Slice de los LMS ordenados
 
-func induceS(sa []int, buckets map[rune][2]int, T []rune, types BitVector) {
-	count := make(map[rune]int)
-	for i := len(sa) - 1; i >= 0; i-- {
-		j := sa[i]
-		if j > 0 && types.get(j-1) {
-			c := T[j-1]
-			count[c]++
-			b := buckets[c]
-			pos := b[1] - count[c]
-			if sa[pos] == -1 {
-				sa[pos] = j - 1
+	// Asignar nombres
+	lmsNames := make([]int, n)
+	for i := range lmsNames {
+		lmsNames[i] = -1
+	}
+
+	currentName := 0
+	lmsNames[lmsIdx[0]] = currentName
+
+	for i := 1; i < nLMS; i++ {
+		prev := lmsIdx[i-1]
+		curr := lmsIdx[i]
+
+		diff := false
+		for d := 0; d < n; d++ {
+			if prev+d >= n || curr+d >= n {
+				diff = true
+				break
+			}
+			if T[prev+d] != T[curr+d] {
+				diff = true
+				break
+			}
+			if d > 0 && (isLMS(prev+d) || isLMS(curr+d)) {
+				// Fin de substring LMS
+				break
 			}
 		}
+
+		if diff {
+			currentName++
+		}
+		lmsNames[curr] = currentName
 	}
+
+	// Construir T reducido (T1)
+	var T1 []int
+	var mapT1 []int // Mapeo de vuelta a índices originales
+	for i := 0; i < n; i++ {
+		if isLMS(i) {
+			T1 = append(T1, lmsNames[i])
+			mapT1 = append(mapT1, i)
+		}
+	}
+
+	// 5. Recursión
+	var SA1 []int
+	if currentName < nLMS-1 {
+		// Nombres no únicos -> Recursión
+		SA1 = saisCore(T1, currentName+1)
+	} else {
+		// Nombres únicos -> Bucket sort directo
+		SA1 = make([]int, nLMS)
+		for i, name := range T1 {
+			SA1[name] = i
+		}
+	}
+
+	// 6. Inducción Final
+	// Mapear SA1 de vuelta a índices originales
+	lmsCorrect := make([]int, nLMS)
+	for i, x := range SA1 {
+		lmsCorrect[i] = mapT1[x]
+	}
+
+	// Reiniciar SA
+	for i := 0; i < n; i++ {
+		SA[i] = -1
+	}
+
+	// Insertar LMS ordenados correctamente
+	copy(bkt, bktEnds) // Reiniciar punteros tail
+	for i := nLMS - 1; i >= 0; i-- {
+		pos := lmsCorrect[i]
+		c := T[pos]
+		bkt[c]--
+		SA[bkt[c]] = pos
+	}
+
+	// Inducción final
+	induceSAL(T, SA, types, bktStarts)
+	induceSAS(T, SA, types, bktEnds)
+
+	return SA
 }
 
-// SA-IS sin recursión profunda (suficiente para la evidencia)
-func sais(T []rune) []int {
-	n := len(T)
-	sa := make([]int, n)
-	for i := range sa {
-		sa[i] = -1
+// Wrapper principal para Strings
+func SAIS(text string) []int {
+	// Convertir string a []int y añadir centinela virtual 0
+	// Esto asegura corrección aunque existan caracteres menores que el final.
+	n := len(text)
+	T := make([]int, n+1)
+	maxChar := 0
+	for i := 0; i < n; i++ {
+		val := int(text[i])
+		T[i] = val
+		if val > maxChar {
+			maxChar = val
+		}
 	}
-	types := classifyTypes(T)
-	buckets, _ := getBuckets(T)
-	lmsMap := make(map[int]int)
+	T[n] = 0 // Centinela virtual (debe ser menor que cualquier char del texto)
 
-	placeLMS(sa, lmsMap, buckets, T, types)
-	induceL(sa, buckets, T, types)
-	induceS(sa, buckets, T, types)
+	SA := saisCore(T, maxChar+1)
 
-	// Para textos grandes con muchos LMS iguales se requiere recursión.
-	// Para el alcance de la práctica, esta versión base es funcional.
-	return sa
+	// El resultado incluye el centinela en la posición 0 del SA.
+	// Lo eliminamos para devolver el SA del texto original.
+	return SA[1:]
 }
 
-// ========================= BWT & FM-Index =========================
+// ========================================================================
+// BWT & FM-Index Utils
+// ========================================================================
 
-func buildBWT(T []rune, sa []int) string {
+func BuildBWT(text string, sa []int) string {
+	var b strings.Builder
 	n := len(sa)
-	bwt := make([]rune, n)
-	for i, pos := range sa {
-		if pos == 0 {
-			bwt[i] = '$'
+	b.Grow(n)
+	for _, idx := range sa {
+		if idx == 0 {
+			b.WriteByte('$')
 		} else {
-			bwt[i] = T[pos-1]
+			b.WriteByte(text[idx-1])
 		}
 	}
-	return string(bwt)
+	return b.String()
 }
 
-func buildFMIndex(bwt string) (map[rune]int, map[rune][]int, []rune) {
-	alphabetSet := make(map[rune]struct{})
-	for _, c := range bwt {
-		alphabetSet[c] = struct{}{}
-	}
-	alphabet := make([]rune, 0, len(alphabetSet))
-	for c := range alphabetSet {
-		alphabet = append(alphabet, c)
-	}
-	// ordenar alfabeto
-	for i := 1; i < len(alphabet); i++ {
-		j := i
-		for j > 0 && alphabet[j-1] > alphabet[j] {
-			alphabet[j-1], alphabet[j] = alphabet[j], alphabet[j-1]
-			j--
-		}
+func BuildFMIndex(bwt string) (map[byte]int, map[byte][]int) {
+	// Alfabeto
+	counts := make(map[byte]int)
+	for i := 0; i < len(bwt); i++ {
+		counts[bwt[i]]++
 	}
 
-	// C[c]
-	C := make(map[rune]int)
-	total := 0
-	for _, c := range alphabet {
-		C[c] = total
-		total += strings.Count(bwt, string(c))
+	// Tabla C (acumulada)
+	C := make(map[byte]int)
+	alphabet := make([]byte, 0, len(counts))
+	for k := range counts {
+		alphabet = append(alphabet, k)
+	}
+	sort.Slice(alphabet, func(i, j int) bool { return alphabet[i] < alphabet[j] })
+
+	sum := 0
+	for _, char := range alphabet {
+		C[char] = sum
+		sum += counts[char]
 	}
 
-	// Occ[c][i]
-	Occ := make(map[rune][]int)
-	for _, c := range alphabet {
-		Occ[c] = make([]int, len(bwt)+1)
+	// Tabla Occ (Ocurrencias)
+	// Optimizada: map de slices
+	Occ := make(map[byte][]int)
+	for _, char := range alphabet {
+		Occ[char] = make([]int, len(bwt)+1)
 	}
-	for i, ch := range bwt {
+
+	for i := 0; i < len(bwt); i++ {
+		char := bwt[i]
 		for _, c := range alphabet {
 			Occ[c][i+1] = Occ[c][i]
 		}
-		Occ[ch][i+1]++
+		Occ[char][i+1]++
 	}
 
-	return C, Occ, alphabet
+	return C, Occ
 }
 
-func fmSearch(pattern string, C map[rune]int, Occ map[rune][]int, bwt string) int {
-	left := 0
-	right := len(bwt)
+func FMSearch(pattern string, C map[byte]int, Occ map[byte][]int, bwtLen int) int {
+	l, r := 0, bwtLen
 	for i := len(pattern) - 1; i >= 0; i-- {
-		c := rune(pattern[i])
-		start, ok := C[c]
-		if !ok {
+		char := pattern[i]
+		if _, ok := C[char]; !ok {
 			return 0
 		}
-		left = start + Occ[c][left]
-		right = start + Occ[c][right]
-		if left >= right {
+		l = C[char] + Occ[char][l]
+		r = C[char] + Occ[char][r]
+		if l >= r {
 			return 0
 		}
 	}
-	return right - left
+	return r - l
 }
 
-// =============================== MAIN ==============================
+// ========================================================================
+// MAIN
+// ========================================================================
 
 func readFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -241,9 +336,9 @@ func readFile(path string) (string, error) {
 	defer f.Close()
 
 	var sb strings.Builder
-	r := bufio.NewReader(f)
+	reader := bufio.NewReader(f)
 	for {
-		chunk, err := r.ReadString('\n')
+		chunk, err := reader.ReadString('\n')
 		sb.WriteString(chunk)
 		if err == io.EOF {
 			break
@@ -252,54 +347,52 @@ func readFile(path string) (string, error) {
 			return "", err
 		}
 	}
-	text := strings.TrimSpace(sb.String())
-	if !strings.HasSuffix(text, "$") {
-		text += "$"
-	}
-	return text, nil
+	// Simular el comportamiento del script de Python: trim + $
+	return strings.TrimSpace(sb.String()) + "$", nil
 }
 
 func main() {
-	filename := "Hamlet.txt"
-	if len(os.Args) > 1 {
-		filename = os.Args[1]
-	} else {
+	if len(os.Args) < 2 {
 		fmt.Println("Uso: go run sais.go <archivo.txt>")
-		fmt.Println("Usando Hamlet.txt por defecto...\n")
+		return
 	}
+	filename := os.Args[1]
 
 	text, err := readFile(filename)
 	if err != nil {
-		fmt.Println("Error al leer archivo:", err)
+		fmt.Printf("Error leyendo %s: %v\n", filename, err)
 		return
 	}
 
-	T := []rune(text)
-	fmt.Printf("Procesando archivo: %s (n = %d)\n", filename, len(T))
+	fmt.Printf("Procesando: %s (len=%d)\n", filename, len(text))
 
-	var mStart, mEnd runtime.MemStats
+	// Medir memoria inicial
+	var m1, m2 runtime.MemStats
 	runtime.GC()
-	runtime.ReadMemStats(&mStart)
+	runtime.ReadMemStats(&m1)
 
 	start := time.Now()
-	sa := sais(T)
-	bwt := buildBWT(T, sa)
-	C, Occ, _ := buildFMIndex(bwt)
-	elapsed := time.Since(start)
+
+	// 1. Construir SA
+	sa := SAIS(text)
+
+	// 2. Construir BWT & Index
+	bwt := BuildBWT(text, sa)
+	C, Occ := BuildFMIndex(bwt)
+
+	duration := time.Since(start)
 
 	runtime.GC()
-	runtime.ReadMemStats(&mEnd)
+	runtime.ReadMemStats(&m2)
+	memUsed := float64(m2.TotalAlloc-m1.TotalAlloc) / 1024 / 1024
 
-	fmt.Printf("Tiempo de construcción SA + FM-Index: %v\n", elapsed)
-	fmt.Printf("Memoria usada aprox: %.2f MB\n",
-		float64(mEnd.Alloc-mStart.Alloc)/1024.0/1024.0)
+	fmt.Printf("Tiempo Total (Go): %.4fs | Memoria alloc: %.2f MB\n", duration.Seconds(), memUsed)
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("\nIntroduce patrón a buscar: ")
-	pat, _ := reader.ReadString('\n')
-	pat = strings.TrimSpace(pat)
-	if pat != "" {
-		count := fmSearch(pat, C, Occ, bwt)
-		fmt.Printf("El patrón %q aparece %d veces.\n", pat, count)
+	// Búsqueda de prueba rápida para verificar integridad básica
+	patterns := []string{"the", "and", "lorem"}
+	fmt.Printf("Consultas rápidas: %v\n", patterns)
+	for _, p := range patterns {
+		count := FMSearch(p, C, Occ, len(bwt))
+		fmt.Printf(" '%s': %d\n", p, count)
 	}
 }
